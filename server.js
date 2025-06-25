@@ -118,18 +118,73 @@ app.put('/api/v1/clients/:id', (req, res) => {
   const id = parseInt(req.params.id , 10);
   const { valid, messageObj } = validateId(id);
   if (!valid) {
-    res.status(400).send(messageObj);
+    return res.status(400).send(messageObj);
   }
 
   let { status, priority } = req.body;
-  let clients = db.prepare('select * from clients').all();
-  const client = clients.find(client => client.id === id);
 
-  /* ---------- Update code below ----------*/
+  const client = db.prepare('SELECT * FROM clients WHERE id = ?').get(id);
+  const originalStatus = client.status;
+  const originalPriority = client.priority;
 
+  if (status && !['backlog', 'in-progress', 'complete'].includes(status)) {
+    return res.status(400).send({
+      message: 'Invalid status value',
+      long_message: 'Status must be one of: backlog | in-progress | complete',
+    });
+  }
 
+  if (priority !== undefined && Number.isNaN(priority)) {
+    return res.status(400).send({
+      message: 'Invalid priority',
+      long_message: 'Priority must be a number',
+    });
+  }
 
-  return res.status(200).send(clients);
+  status = status || originalStatus;
+  priority = priority || originalPriority;
+
+  const txn = db.transaction(() => {
+    if (originalStatus !== status) {
+      db.prepare(`
+        UPDATE clients SET priority = priority - 1
+        WHERE status = ? AND priority > ?
+      `).run(originalStatus, originalPriority);
+
+      db.prepare(`
+        UPDATE clients SET priority = priority + 1
+        WHERE status = ? AND priority >= ?
+      `).run(status, priority);
+    } else {
+      if (priority < originalPriority) {
+        db.prepare(`
+          UPDATE clients SET priority = priority + 1
+          WHERE status = ? AND priority >= ? AND priority < ?
+        `).run(status, priority, originalPriority);
+      } else if (priority > originalPriority) {
+        db.prepare(`
+          UPDATE clients SET priority = priority - 1
+          WHERE status = ? AND priority <= ? AND priority > ?
+        `).run(status, priority, originalPriority);
+      }
+    }
+
+    db.prepare(`
+      UPDATE clients SET status = ?, priority = ? WHERE id = ?
+    `).run(status, priority, id);
+  });
+
+  try {
+    txn();
+  } catch (err) {
+    return res.status(500).send({
+      message: 'Database update failed',
+      error: err.message,
+    });
+  }
+
+  const updatedClients = db.prepare('SELECT * FROM clients').all();
+  return res.status(200).send(updatedClients);
 });
 
 app.listen(3001);
